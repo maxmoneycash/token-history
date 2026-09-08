@@ -116,6 +116,8 @@ def resolve_collector(cfg):
     if executable is not None:
         if not isinstance(executable, str) or not executable.strip():
             die("collector.executable must be a non-empty executable name or path")
+        if not os.path.isabs(executable):
+            die("collector.executable must be an absolute path so scheduled runs do not depend on PATH.")
         path = shutil.which(executable)
         if not path:
             die("collector executable not found: {}. Install it or set an absolute path.".format(executable))
