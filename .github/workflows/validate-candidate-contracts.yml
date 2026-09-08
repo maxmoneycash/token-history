@@ -1,0 +1,101 @@
+name: Validate candidate collector contracts
+
+on:
+  pull_request:
+    branches: [feat/installed-usage-collector]
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            archive: turbotokens-linux-x64.tar.gz
+            artifact: '10058175672'
+            sha256: 69b626c8050df3ba3304e07bb1faff53849c618b187dde86845c55b26ca3f627
+          - os: ubuntu-24.04-arm
+            archive: turbotokens-linux-arm64.tar.gz
+            artifact: '10058170308'
+            sha256: bf3a63aa51b45cb48d002f5f1e4b9b66a5f7c87d3b44a5dcb9f1e4f1a931c29b
+          - os: macos-15
+            archive: turbotokens-macos-arm64.tar.gz
+            artifact: '10058192197'
+            sha256: 694fa319577049963f4373cbc1b8d7fcd83a2beb509b8af0f125a20afdda4c49
+          - os: macos-15-intel
+            archive: turbotokens-macos-x64.tar.gz
+            artifact: '10058318436'
+            sha256: 81777b307ca55caa917e1ef07741118ca734adc82576477619705ca370025d70
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.5.0'
+      - name: Download and verify the validated native candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ matrix.artifact }}
+          ARTIFACT_SHA256: ${{ matrix.sha256 }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          gh api "repos/maxmoneycash/turbotokens/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/native-artifact.zip"
+          python - <<'PY'
+          import hashlib, io, json, os, pathlib, tarfile, zipfile
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          raw = (root / "native-artifact.zip").read_bytes()
+          digest = hashlib.sha256(raw).hexdigest()
+          assert digest == os.environ["ARTIFACT_SHA256"], "artifact SHA-256 mismatch"
+          with zipfile.ZipFile(io.BytesIO(raw)) as artifact:
+              assert artifact.namelist() == [os.environ["ARCHIVE"]], "unexpected artifact members"
+              archive = artifact.read(os.environ["ARCHIVE"])
+          with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+              member = bundle.getmember("turbotokens")
+              assert member.isfile(), "binary must be a regular file"
+              binary = bundle.extractfile(member).read()
+          executable = root / "turbotokens"
+          executable.write_bytes(binary)
+          executable.chmod(0o755)
+          proof = root / "proof"
+          proof.mkdir()
+          (proof / "binary.json").write_text(json.dumps({
+              "source": "c0de907857b6cd0c536afa688d3697e1a23a33c3",
+              "artifact_id": os.environ["ARTIFACT_ID"],
+              "artifact_sha256": digest,
+              "archive_sha256": hashlib.sha256(archive).hexdigest(),
+              "binary_sha256": hashlib.sha256(binary).hexdigest()
+          }, indent=2) + "\n")
+          PY
+          test "$("$RUNNER_TEMP/turbotokens" --version)" = 'turbotokens 1.1.3'
+      - name: Install the published comparison collector
+        run: npm install --prefix "$RUNNER_TEMP/ccusage" ccusage@20.0.20
+      - name: Verify candidate contracts
+        env:
+          TOKEN_HISTORY_TEST_TURBOTOKENS: ${{ runner.temp }}/turbotokens
+          TOKEN_HISTORY_TEST_CCUSAGE: ${{ runner.temp }}/ccusage/node_modules/.bin/ccusage
+        run: |
+          python --version
+          node --version
+          "$RUNNER_TEMP/turbotokens" --version
+          "$RUNNER_TEMP/ccusage/node_modules/.bin/ccusage" --version
+          python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/proof/tests.log"
+      - name: Retain proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-contracts-${{ matrix.os }}
+          path: ${{ runner.temp }}/proof
+          if-no-files-found: warn
